@@ -6,6 +6,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import QDir
 from PyQt5.QtGui import QFont
+from PyQt5.QtWidgets import QHeaderView
 
 import string
 import os
@@ -39,10 +40,17 @@ class FileLauncher(QWidget):
 
         self.tree = QTreeView()
         self.tree.setModel(self.model)
-        self.tree.setColumnWidth(0, 300)
         self.tree.clicked.connect(self.on_file_selected)
-        left_panel.addWidget(self.tree)
+        
+        
+        header = self.tree.header()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)      # 파일명 컬럼
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
 
+        self.tree.setColumnWidth(0, 800)  # 초기 폭 (선택)     
+        left_panel.addWidget(self.tree)
         layout.addLayout(left_panel, 2)
 
         # --- 오른쪽 패널: 실행 버튼 ---

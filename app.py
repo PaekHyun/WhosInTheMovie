@@ -175,11 +175,8 @@ class FileLauncher(QWidget):
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
 
-        self.tree.setColumnWidth(0, 800)  # 초기 폭 (선택)
-        
-        
+        self.tree.setColumnWidth(0, 800)  # 초기 폭 (선택)     
         left.addWidget(self.tree)
-
         layout.addLayout(left, 2)
 
         # 오른쪽
