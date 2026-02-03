@@ -67,7 +67,7 @@ def process_video(video_path):
 
     WIDTH, HEIGHT = 1920, 1080
 
-    model_path = get_resource_path("yolov8n-seg.pt")
+    model_path = get_resource_path("yolov8s-seg.pt")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("YOLO device:", device)
@@ -126,27 +126,36 @@ def process_video(video_path):
             
             frame_web = cv2.flip(frame_web, 1)
 
+            # [변경] 추론 시 옵션 추가
             results = model.predict(
                 frame_web,
                 classes=[0],
-                imgsz=640,
+                imgsz=960,             # 해상도를 살짝 높임 (성능 봐가며 조절)
                 half=(device == "cuda"),
                 device=device,
-                verbose=False
+                verbose=False,
+                retina_masks=True      # 핵심: 고해상도 마스크 사용
             )
-
+            
             if results[0].masks is not None:
+                # results[0].masks.data는 (N, H, W) 형태임
+                # 모든 사람(class 0)의 마스크를 합침
                 masks = results[0].masks.data
-                combined_mask = torch.any(masks, dim=0).float()
-                combined_mask = cv2.resize(
-                    combined_mask.cpu().numpy(),
-                    (WIDTH, HEIGHT)
-                )
-                mask_bool = combined_mask > 0
+                combined_mask = torch.any(masks, dim=0).byte() # float보다 byte가 메모리 효율적
+
+                # 마스크를 웹캠 프레임 크기(1920x1080)로 확대
+                # 텐서를 직접 다루는 것보다 results에서 바로 가져오는 것이 더 깔끔할 수 있음
+                mask_np = combined_mask.cpu().numpy()
+                mask_np = cv2.resize(mask_np, (WIDTH, HEIGHT), interpolation=cv2.INTER_NEAREST)
+                
+                mask_bool = mask_np > 0
+
+                # [최적화] 합성 시 경계면 부드럽게 (선택 사항)
+                # 경계면이 너무 칼같다면 가우시안 블러를 살짝 섞을 수 있습니다.
                 frame_vid[mask_bool] = frame_web[mask_bool]
 
+            # 최종 출력 윈도우 설정 확인
             cv2.imshow("Sync Overlay", frame_vid)
-
             if cv2.waitKey(1) == 27:
                 break
 
