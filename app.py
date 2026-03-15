@@ -15,7 +15,6 @@ import subprocess
 # GUI 프로세스에서는 CUDA 차단
 # =========================
 if __name__ == "__main__" and len(sys.argv) == 1:
-    # GUI 모드
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
 
@@ -26,6 +25,7 @@ def get_resource_path(filename):
     if getattr(sys, "frozen", False):
         return os.path.join(os.path.dirname(sys.executable), filename)
     return os.path.join(os.path.dirname(__file__), filename)
+
 
 # =========================
 # 웹캠 자동 탐색
@@ -39,6 +39,7 @@ def find_camera(max_index=5):
             return i
         cap.release()
     return None
+
 
 # =========================
 # 영상 처리 (CUDA 전용 프로세스)
@@ -74,7 +75,7 @@ def process_video(video_path):
 
     # 모델 워밍업 (첫 프레임 지연 방지)
     dummy = np.zeros((HEIGHT, WIDTH, 3), dtype=np.uint8)
-    model.predict(dummy, classes=[0], imgsz=960, half=(device == "cuda"),
+    model.predict(dummy, classes=[0], imgsz=640, half=(device == "cuda"),
                   device=device, verbose=False, retina_masks=True)
 
     cap = cv2.VideoCapture(video_path)
@@ -90,7 +91,6 @@ def process_video(video_path):
     cam = cv2.VideoCapture(cam_index)
     cam.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
     cam.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
-    # 웹캠 버퍼 최소화 → 지연 감소
     cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     player = MediaPlayer(video_path)
@@ -102,14 +102,35 @@ def process_video(video_path):
         cv2.WINDOW_FULLSCREEN
     )
 
+    stop_event = threading.Event()
+
     # =========================
-    # YOLO 워커 스레드 설정
-    # 웹캠 프레임을 받아 추론 후 마스크를 반환
+    # ① 웹캠 전용 스레드
+    # 항상 최신 프레임을 latest_cam_frame 에 유지
+    # 메인 루프가 cam.read() 를 직접 호출하지 않으므로
+    # 버퍼 누적 딜레이가 사라짐
+    # =========================
+    latest_cam_frame = [None]
+    cam_lock = threading.Lock()
+
+    def cam_worker():
+        while not stop_event.is_set():
+            ret, frame = cam.read()
+            if not ret:
+                continue
+            flipped = cv2.flip(frame, 1)
+            with cam_lock:
+                latest_cam_frame[0] = flipped
+
+    cam_thread = threading.Thread(target=cam_worker, daemon=True)
+    cam_thread.start()
+
+    # =========================
+    # ② YOLO 워커 스레드
     # maxsize=1: 항상 최신 프레임만 처리
     # =========================
     input_queue  = queue.Queue(maxsize=1)   # 웹캠 프레임 → YOLO
     output_queue = queue.Queue(maxsize=1)   # 마스크 결과 → 메인 루프
-    stop_event   = threading.Event()
 
     def yolo_worker():
         while not stop_event.is_set():
@@ -121,7 +142,7 @@ def process_video(video_path):
             results = model.predict(
                 frame_web,
                 classes=[0],
-                imgsz=960,
+                imgsz=640,          # 960 → 640: 추론 속도 향상
                 half=(device == "cuda"),
                 device=device,
                 verbose=False,
@@ -151,8 +172,13 @@ def process_video(video_path):
     # 마지막으로 받은 마스크 (YOLO가 느려도 이전 마스크 재사용)
     last_mask = None
 
-    # 비디오 프레임 순차 읽기용 타이머
     frame_interval = 1.0 / orig_fps if orig_fps > 0 else 1.0 / 30.0
+
+    # 웹캠 스레드가 첫 프레임을 채울 때까지 잠깐 대기
+    import time
+    timeout = time.time() + 3.0
+    while latest_cam_frame[0] is None and time.time() < timeout:
+        time.sleep(0.01)
 
     try:
         while True:
@@ -164,12 +190,9 @@ def process_video(video_path):
                 continue
 
             # ── 비디오: seek 없이 순차 읽기 ──────────────
-            # 오디오 타임스탬프 기반으로 필요한 만큼 skip
             audio_time = audio_frame[1]
             video_time = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
 
-            # 비디오가 오디오보다 많이 앞서 있으면 대기 (거의 없음)
-            # 비디오가 뒤처지면 따라잡을 때까지 읽기
             while video_time < audio_time - frame_interval:
                 ret, frame_vid = cap.read()
                 if not ret:
@@ -182,14 +205,17 @@ def process_video(video_path):
 
             frame_vid = cv2.resize(frame_vid, (WIDTH, HEIGHT))
 
-            # ── 웹캠 프레임 읽기 ─────────────────────────
-            ret, frame_web = cam.read()
-            if not ret:
+            # ── 웹캠 최신 프레임 가져오기 (스레드에서 유지) ──
+            with cam_lock:
+                frame_web = latest_cam_frame[0]
+
+            if frame_web is None:
+                cv2.imshow("Sync Overlay", frame_vid)
+                if cv2.waitKey(1) == 27:
+                    break
                 continue
-            frame_web = cv2.flip(frame_web, 1)
 
             # ── YOLO 입력 큐에 최신 프레임 전달 ──────────
-            # 큐가 차 있으면 오래된 것 버리고 최신 프레임 넣기
             if input_queue.full():
                 try:
                     input_queue.get_nowait()
@@ -201,7 +227,7 @@ def process_video(video_path):
             try:
                 last_mask = output_queue.get_nowait()
             except queue.Empty:
-                pass  # 이전 마스크 그대로 사용
+                pass
 
             # ── 합성 ─────────────────────────────────────
             if last_mask is not None:
@@ -218,6 +244,7 @@ def process_video(video_path):
     finally:
         stop_event.set()
         worker_thread.join(timeout=3)
+        cam_thread.join(timeout=3)
         player.close_player()
         cap.release()
         cam.release()
